@@ -1,108 +1,135 @@
 'use strict';
 
-const app = require('express')();
-const churchill = require('churchill');
+const _ = require('lodash');
 const path = require('path');
-const hofMiddleware = require('hof').middleware;
+const http = require('http');
+const https = require('https');
+const hof = require('hof');
+const express = require('express');
+const churchill = require('churchill');
 const router = require('./lib/router');
 const serveStatic = require('./lib/serve-static');
 const sessionStore = require('./lib/sessions');
 const settings = require('./lib/settings');
 const defaults = require('./lib/defaults');
+const logger = require('./lib/logger');
+const cookieParser = require('cookie-parser');
 
-const getConfig = function getConfig() {
-  const args = [].slice.call(arguments);
-  return Object.assign.apply(null, [{}, defaults].concat(args));
-};
+const middleware = hof.middleware;
+const i18nFuture = hof.i18n;
 
-module.exports = options => {
+module.exports = class App {
+  constructor(options) {
+    this.validateOptions(options);
+    this.options = Object.assign({}, defaults, options);
 
-  const load = (config) => {
-    config.routes.forEach((route) => {
-      const routeConfig = Object.assign({}, {route}, config);
-      app.use(router(routeConfig));
-    });
-  };
-
-  const bootstrap = {
-
-    use: middleware => {
-      app.use(middleware);
-    },
-
-    start: config => {
-      return new Promise((resolve, reject) => {
-        if (config.start !== false) {
-          if (!config.protocol) {
-            config = getConfig(options, config);
-          }
-          bootstrap.server = require(config.protocol).createServer(app);
-          try {
-            bootstrap.server.listen(config.port, config.host, () => {
-              resolve(bootstrap);
-            });
-          } catch (err) {
-            reject(err);
-          }
-        }
-        return resolve(bootstrap);
-      });
-    },
-
-    stop: () => {
-      bootstrap.server.close();
-    }
-
-  };
-
-  const config = getConfig(options);
-
-  const i18n = require('hof').i18n({
-    path: path.resolve(config.caller, config.translations) + '/__lng__/__ns__.json'
-  });
-
-  if (!config || !config.routes || !config.routes.length) {
-    throw new Error('Must be called with a list of routes');
+    this._started = false;
+    this._app = express();
+    this.initTranslations();
+    this.applyMiddleware();
+    this.addLogger();
   }
 
-  config.routes.forEach(route => {
-    if (!route.steps) {
-      throw new Error('Each route must define a set of one or more steps');
-    }
-  });
-
-  if (config.env !== 'test' && config.env !== 'ci') {
-    config.logger = require('./lib/logger')(config);
-    bootstrap.use(churchill(config.logger));
+  initTranslations() {
+    this.i18n = i18nFuture({
+      path: path.resolve(this.options.caller, this.options.translations) + '/__lng__/__ns__.json'
+    });
+    this.i18n.on('ready', () => this.applyI18nDependentMiddleware());
   }
 
-  serveStatic(app, config);
-  settings(app, config);
-  sessionStore(app, config);
+  addLogger() {
+    if (this.options.env !== 'test' && this.options.env !== 'ci') {
+      this.options.logger = logger(this.options);
+      this.use(churchill(this.options.logger));
+    }
+  }
 
-  // check for cookies
-  app.use(hofMiddleware.cookies());
+  validateOptions(options) {
+    if (!options || !options.routes || !options.routes.length) {
+      throw new Error('Must be called with a list of routes')
+    }
 
-  load(config);
-
-  return new Promise((resolve) => {
-    i18n.on('ready', () => {
-      if (config.getCookies === true) {
-        app.get('/cookies', (req, res) => res.render('cookies', i18n.translate('cookies')));
+    options.routes.forEach(route => {
+      if (!route.steps) {
+        throw new Error('Each route must define a set of one or more steps');
       }
-      if (config.getTerms === true) {
-        app.get('/terms-and-conditions', (req, res) => res.render('terms', i18n.translate('terms')));
-      }
-      app.use(hofMiddleware.notFound({
-        logger: config.logger,
-        translate: i18n.translate.bind(i18n),
-      }));
-      bootstrap.use(hofMiddleware.errors({
-        translate: i18n.translate.bind(i18n),
-        debug: config.env === 'development'
-      }));
-      resolve(bootstrap);
+    })
+  }
+
+  initRedis() {
+    this.redisClient = sessionStore(this._app, this.options);
+  }
+
+  applyMiddleware() {
+    this.initRedis();
+    this.parseCookies();
+    serveStatic(this._app, this.options);
+    settings(this._app, this.options);
+    this.use(middleware.cookies());
+  }
+
+  parseCookies() {
+    this._app.use(cookieParser(this.options.session.secret, {
+      path: '/',
+      httpOnly: true,
+      secure: this.options.protocol === 'https'
+    }));
+  }
+
+  applyI18nDependentMiddleware() {
+    if (this.options.getCookies === true) {
+      this._app.get('/cookies', (req, res) => res.render('cookies', this.i18n.translate('cookies')));
+    }
+    if (this.options.getTerms === true) {
+      this._app.get('/terms-and-conditions', (req, res) => res.render('terms', this.i18n.translate('terms')));
+    }
+  }
+
+  addRoutes() {
+    this.options.routes.forEach(route => {
+      const routeConfig = Object.assign({}, {route}, this.options);
+      this.use(router(routeConfig));
     });
-  }).then(() => bootstrap.start(config));
+  }
 
-};
+  catchErrors() {
+    // this.use(middleware.notFound({
+    //   logger: this.options.logger,
+    //   translate: this.i18n.translate.bind(this.i18n),
+    // }));
+    //
+    // this.use(middleware.errors({
+    //   translate: this.i18n.translate.bind(this.i18n),
+    //   debug: this.options.env === 'development'
+    // }));
+  }
+
+  use(middleware) {
+    this._app.use(middleware);
+  }
+
+  start(cb) {
+    cb = cb || _.noop;
+    this.addRoutes();
+    this.catchErrors();
+    if (this._started) {
+      // this.options.logger.warn('App already started, exiting.');
+      return false;
+    }
+    this._server = this.options.protocol === 'https'
+      ? https.createServer(this._app)
+      : http.createServer(this._app);
+    this._server.listen(this.options.port, this.options.host, () => {
+      this._started = true;
+      cb();
+    });
+  }
+
+  stop(cb) {
+    cb = cb || _.noop;
+    // this.redisClient.quit();
+    this._server.close(() => {
+      this._started = false;
+    });
+  }
+}
