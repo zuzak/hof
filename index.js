@@ -65,6 +65,10 @@ function bootstrap(options) {
 
   let config = getConfig(options);
 
+  if (typeof config.theme === 'string') {
+    config.theme = require(`hof-theme-${config.theme}`);
+  }
+
   const i18n = i18nFuture({
     path: path.resolve(config.root, config.translations) + '/__lng__/__ns__.json'
   });
