@@ -14,6 +14,7 @@ const settings = require('./lib/settings');
 const defaults = require('./lib/defaults');
 const logger = require('./lib/logger');
 const helmet = require('helmet');
+const uuid = require('uuid');
 
 const customConfig = {};
 
@@ -51,6 +52,11 @@ function bootstrap(options) {
 
   app.use(helmet());
 
+  app.use((req, res, next) => {
+    res.locals.nonce = uuid.v4();
+    next();
+  });
+
   /* eslint-disable quotes */
   app.use(helmet.contentSecurityPolicy({
     directives: {
@@ -58,7 +64,12 @@ function bootstrap(options) {
       styleSrc: ["'self'"],
       imgSrc: ["'self'"],
       fontSrc: ["'self'", "data:"],
-      scriptSrc: ["'self'", "'unsafe-inline'"]
+      scriptSrc: [
+        "'self'",
+        (req, res) => {
+          return "'nonce-" + res.locals.nonce + "'";
+        }
+      ]
     }
   }));
   /* eslint-enable quotes */
