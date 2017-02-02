@@ -67,6 +67,8 @@ function bootstrap(options) {
 
   if (typeof config.theme === 'string') {
     config.theme = require(`hof-theme-${config.theme}`);
+  } else {
+    config.theme = null;
   }
 
   const i18n = i18nFuture({
